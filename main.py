@@ -16,14 +16,26 @@ class Drawable:
 
 
 class Collision:
-    def aabb_collision(self, other):
+    def __init__(self):
+        self.callbacks = []
+
+    def check_aabb_collision(self, other):
         """AABB (Axis-Aligned Bounding Box) 衝突判定"""
         return (
-            self.x < other.x + other.width and
-            self.x + self.width > other.x and
-            self.y < other.y + other.height and
-            self.y + self.height > other.y
+                self.x < other.x + other.width and
+                self.x + self.width > other.x and
+                self.y < other.y + other.height and
+                self.y + self.height > other.y
         )
+
+    def check(self, collisions):
+        for other in collisions:
+            if self.check_aabb_collision(other):
+                for callback in self.callbacks:
+                    callback(other)
+
+    def listen(self, callback):
+        self.callbacks.append(callback)
 
 
 # ======================
@@ -41,8 +53,8 @@ class GameObject(Updatable, Drawable):
 # =======================
 
 class Input:
-    @property
-    def direction(self):
+    @staticmethod
+    def direction():
         if pyxel.btn(pyxel.KEY_A):
             return -1
         if pyxel.btn(pyxel.KEY_D):
@@ -57,11 +69,14 @@ class Input:
 class Paddle(GameObject, Collision):
     def __init__(self):
         super().__init__(270, 350)
+        Collision.__init__(self)
         self.width = 60
         self.height = 10
         self.speed = 8
 
-    def update(self, direction):
+    def update(self):
+        direction = Input.direction()
+
         self.x += direction * self.speed
         self.x = max(0, min(self.x, pyxel.width - self.width))
 
@@ -76,6 +91,7 @@ class Paddle(GameObject, Collision):
 class Ball(GameObject, Collision):
     def __init__(self):
         super().__init__(300, 300)
+        Collision.__init__(self)
         self.radius = 4
         self.width = self.radius * 2
         self.height = self.radius * 2
@@ -103,6 +119,7 @@ class Ball(GameObject, Collision):
 class Block(GameObject, Collision):
     def __init__(self, x, y, width=50, height=20, color=10):
         super().__init__(x, y)
+        Collision.__init__(self)
         self.width = width
         self.height = height
         self.color = color
@@ -111,6 +128,21 @@ class Block(GameObject, Collision):
     def draw(self):
         if self.active:
             pyxel.rect(self.x, self.y, self.width, self.height, self.color)
+
+
+# =======================
+# 🚫デッドゾーンクラス
+# =======================
+
+class DeadZone(GameObject, Collision):
+    def __init__(self):
+        super().__init__(0, pyxel.height - 5)
+        Collision.__init__(self)
+        self.width = pyxel.width
+        self.height = 5
+
+    def draw(self):
+        pyxel.rect(self.x, self.y, self.width, self.height, 8)
 
 
 # =======================
@@ -133,94 +165,113 @@ class Score(GameObject):
 # =======================
 
 class GameLogic:
-    @staticmethod
-    def check_collision(ball, paddle):
-        """ボールとパドルの衝突判定"""
-        if paddle.aabb_collision(ball):
-            ball.dy *= -1
-            offset = (ball.x - (paddle.x + paddle.width / 2)) / (paddle.width / 2)
-            ball.dx = offset * 5
+    def __init__(self, ball, paddle, blocks, score, dead_zone):
+        self.ball = ball
+        self.paddle = paddle
+        self.blocks = blocks
+        self.dead_zone = dead_zone
+        self.score = score
+        self.game_over = False
 
-    @staticmethod
-    def check_block_collision(ball, blocks, score):
-        """ボールとブロックの衝突判定"""
-        for block in blocks:
-            if block.active and block.aabb_collision(ball):
-                block.active = False
-                ball.dy *= -1
-                score.add(100)
-                break
+        self.reset()
+
+        ball.listen(self.on_paddle_collision)
+        ball.listen(self.on_block_collision)
+        dead_zone.listen(self.on_dead_zone_collision)
+
+    def reset(self):
+        self.score.value = 0
+        self.ball.x, self.ball.y = 300, 300
+        self.ball.dx, self.ball.dy = 4, -4
+        self.paddle.y = 350
+
+        for block in self.blocks:
+            block.active = True
+        self.game_over = False
+
+    def on_game_over(self):
+        self.game_over = True
+
+    def on_paddle_collision(self, other):
+        if isinstance(other, Paddle):
+            self.ball.dy *= -1
+            offset = (self.ball.x - (self.paddle.x + self.paddle.width / 2)) / (self.paddle.width / 2)
+            self.ball.dx = offset * 5
+
+    def on_block_collision(self, other):
+        if isinstance(other, Block) and other.active:
+            other.active = False
+            self.ball.dy *= -1
+            self.score.add(100)
+
+            if all(not block.active for block in self.blocks):
+                self.on_game_over()
+
+    def on_dead_zone_collision(self, other):
+        if isinstance(other, Ball):
+            self.on_game_over()
 
 
 # =======================
 # 🎮 ゲームクラス
 # =======================
 
+def create_blocks():
+    """ブロック生成"""
+    blocks = []
+    for row in range(5):
+        for col in range(10):
+            x = col * 55 + 25
+            y = row * 25 + 50
+            blocks.append(Block(x, y))
+    return blocks
+
+
 class BreakOut:
     def __init__(self):
         pyxel.init(600, 400, title="Break Out")
-        self.input = Input()
+
         self.paddle = Paddle()
         self.ball = Ball()
-        self.blocks = self.create_blocks()
+        self.blocks = create_blocks()
         self.score = Score()
-        self.game_over = False
-        pyxel.run(self.update, self.draw)
+        self.dead_zone = DeadZone()
 
-    def create_blocks(self):
-        """ブロック生成"""
-        blocks = []
-        for row in range(5):
-            for col in range(10):
-                x = col * 55 + 25
-                y = row * 25 + 50
-                blocks.append(Block(x, y))
-        return blocks
+        self.logic = GameLogic(self.ball, self.paddle, self.blocks, self.score, self.dead_zone)
+
+        self.game_objects = [
+            self.paddle,
+            self.ball,
+            self.score,
+            self.dead_zone,
+            *self.blocks
+        ]
+
+        self.collisions = [obj for obj in self.game_objects if isinstance(obj, Collision)]
+
+        pyxel.run(self.update, self.draw)
 
     def update(self):
         """ゲーム全体の更新処理"""
-        if self.game_over:
+        if self.logic.game_over:
             if pyxel.btnp(pyxel.KEY_R):
-                self.reset_game()
+                self.logic = GameLogic(self.ball, self.paddle, self.blocks, self.score, self.dead_zone)
             return
 
-        direction = self.input.direction
-        self.paddle.update(direction)
-        self.ball.update()
+        for col in self.collisions:
+            col.check(self.collisions)
 
-        # 衝突判定
-        GameLogic.check_collision(self.ball, self.paddle)
-        GameLogic.check_block_collision(self.ball, self.blocks, self.score)
-
-        # ボールが下に落ちたらゲームオーバー
-        if self.ball.y > pyxel.height:
-            self.game_over = True
-
-        # 全てのブロックが破壊されたらゲームクリア
-        if all(not block.active for block in self.blocks):
-            self.game_over = True
-
-    def reset_game(self):
-        """ゲームをリセット"""
-        self.ball.x, self.ball.y = 300, 300
-        self.ball.dx, self.ball.dy = 4, -4
-        self.blocks = self.create_blocks()
-        self.score.value = 0
-        self.game_over = False
+        for obj in self.game_objects:
+            obj.update()
 
     def draw(self):
-        """描画処理"""
         pyxel.cls(0)
-        self.paddle.draw()
-        self.ball.draw()
-        self.score.draw()
-        for block in self.blocks:
-            block.draw()
+        for obj in self.game_objects:
+            obj.draw()
 
-        if self.game_over:
+        if self.logic.game_over:
             pyxel.text(240, 180, "GAME OVER!", 8)
             pyxel.text(220, 200, "Press R to Restart", 7)
 
 
-# ゲーム実行
 BreakOut()
